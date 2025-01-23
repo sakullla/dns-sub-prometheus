@@ -1,4 +1,4 @@
-module dns-sub-prometheus
+module github.com/sakullla/dns-sub-prometheus
 
 go 1.23
 
