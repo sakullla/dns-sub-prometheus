@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,28 +162,21 @@ func queryAliDNS(domain string, clientIPs []string) (map[string][]string, []stri
 	// 存储结果（按 clientIP 分组）
 	resultMap := make(map[string][]string)
 	allIPMap := make(map[string]bool)
+	// 转换去重的 IP 列表
+	var uniqueIPs []string
 
 	// 处理 channel 结果
 	for res := range resultChan {
+		// 提取所有的 key
 		resultMap[res.ClientIP] = res.IPs
-		for _, ip := range res.IPs {
-			allIPMap[ip] = true
+		subIPs := res.IPs
+		for _, ip := range subIPs {
+			// 检查是否存在 "ip"
+			if _, exists := allIPMap[ip]; !exists {
+				uniqueIPs = append(uniqueIPs, ip)
+				allIPMap[ip] = true
+			}
 		}
-	}
-
-	// 提取所有的 key
-	allIPs := make([]string, 0, len(allIPMap))
-	for k := range allIPMap {
-		allIPs = append(allIPs, k)
-	}
-
-	// 按 key 进行排序
-	sort.Strings(allIPs)
-
-	// 转换去重的 IP 列表
-	var uniqueIPs []string
-	for _, ip := range allIPs {
-		uniqueIPs = append(uniqueIPs, ip)
 	}
 
 	return resultMap, uniqueIPs
@@ -454,8 +446,7 @@ func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
 				parseDnsProxies = append(parseDnsProxies, proxy) // Append proxy immediately when first encountered
 			}
 		} else {
-			_, exists := serverIndexMap[proxy.Server]
-			if !exists {
+			if _, exists := serverIndexMap[proxy.Server]; !exists {
 				serverIndexMap[proxy.Server] = i
 				for _, ecsTag := range ecsIPMaps {
 					clientIp := ecsTag.Ip
@@ -466,8 +457,7 @@ func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
 						copyProxy := proxy
 						copyProxy.Name = fmt.Sprintf("%s(%s-%s)", proxy.Name, ip, clientName)
 						copyProxy.Server = ip
-						_, exists := serverIndexMap[copyProxy.Server]
-						if !exists {
+						if _, subExists := serverIndexMap[copyProxy.Server]; !subExists {
 							serverIndexMap[copyProxy.Server] = i
 							parseDnsProxies = append(parseDnsProxies, copyProxy)
 						}
