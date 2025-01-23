@@ -10,10 +10,17 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+// ProxyJSON defines the JSON structure as per the given format
+type EcsTag struct {
+	Name string `json:"name"`
+	Ip   string `json:"ip"`
+}
 
 // Proxy defines the Proxy struct for unmarshalling the relevant section of the YAML
 type Proxy struct {
@@ -155,19 +162,28 @@ func queryAliDNS(domain string, clientIPs []string) (map[string][]string, []stri
 
 	// 存储结果（按 clientIP 分组）
 	resultMap := make(map[string][]string)
-	allIPs := make(map[string]bool)
+	allIPMap := make(map[string]bool)
 
 	// 处理 channel 结果
 	for res := range resultChan {
 		resultMap[res.ClientIP] = res.IPs
 		for _, ip := range res.IPs {
-			allIPs[ip] = true
+			allIPMap[ip] = true
 		}
 	}
 
+	// 提取所有的 key
+	allIPs := make([]string, 0, len(allIPMap))
+	for k := range allIPMap {
+		allIPs = append(allIPs, k)
+	}
+
+	// 按 key 进行排序
+	sort.Strings(allIPs)
+
 	// 转换去重的 IP 列表
 	var uniqueIPs []string
-	for ip := range allIPs {
+	for _, ip := range allIPs {
 		uniqueIPs = append(uniqueIPs, ip)
 	}
 
@@ -361,7 +377,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	ecsIPsParam := r.URL.Query().Get("ecsIPMaps") // 例如 "1,2,3"
 	if ecsIPsParam != "" {
 		// 使用 "," 分割参数
-		ecsIPs := parseParamToMap(ecsIPsParam)
+		ecsIPs := parseParamToEcsTag(ecsIPsParam)
 		proxies = convert2DnsAndRemoveProxies(proxies, ecsIPs)
 	} else {
 		proxies = removeDuplicateProxies(proxies)
@@ -389,9 +405,9 @@ func removeIgnoreProxies(proxies []Proxy) []Proxy {
 	return uniqueProxies
 }
 
-func parseParamToMap(rawValue string) map[string]string {
+func parseParamToEcsTag(rawValue string) []EcsTag {
 	// 提前声明 map 变量
-	paramMap := make(map[string]string)
+	paramMap := make([]EcsTag, 0)
 
 	// 解析 "先:1,安:2,你:3" 形式的数据
 	pairs := strings.Split(rawValue, ",")
@@ -399,10 +415,12 @@ func parseParamToMap(rawValue string) map[string]string {
 		// 使用 `SplitN` 避免多个 `:` 导致错误
 		kv := strings.SplitN(pair, ":", 2)
 		if len(kv) == 2 {
-			paramMap[kv[0]] = kv[1]
+			paramMap = append(paramMap, EcsTag{
+				Name: kv[0],
+				Ip:   kv[1],
+			})
 		}
 	}
-
 	return paramMap
 }
 
@@ -425,7 +443,7 @@ func isIPAddress(input string) bool {
 	return net.ParseIP(input) != nil
 }
 
-func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps map[string]string) []Proxy {
+func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
 	serverIndexMap := make(map[string]int)
 	var parseDnsProxies []Proxy
 	for i, proxy := range proxies {
@@ -439,7 +457,9 @@ func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps map[string]string) [
 			_, exists := serverIndexMap[proxy.Server]
 			if !exists {
 				serverIndexMap[proxy.Server] = i
-				for clientName, clientIp := range ecsIPMaps {
+				for _, ecsTag := range ecsIPMaps {
+					clientIp := ecsTag.Ip
+					clientName := ecsTag.Name
 					_, ips := queryAliDNS(proxy.Server, []string{clientIp})
 					// 复制结构体并修改 Server
 					for _, ip := range ips {
@@ -456,7 +476,6 @@ func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps map[string]string) [
 			}
 		}
 	}
-
 	return parseDnsProxies
 }
 
