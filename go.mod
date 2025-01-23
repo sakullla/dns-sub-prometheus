@@ -1,4 +1,4 @@
-module awesomeProject
+module dns-sub-prometheus
 
 go 1.23
 
