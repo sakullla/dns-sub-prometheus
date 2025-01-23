@@ -1,0 +1,2 @@
+# dns-sub-prometheus
+支持将订阅以及dns信息转换为prometheus http_sd_configs的一个小工具
