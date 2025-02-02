@@ -491,6 +491,7 @@ func convertProxiesToJSON(proxies []Proxy, group string) ([]byte, error) {
 			Targets: []string{fmt.Sprintf("%s:%d", proxy.Server, proxy.Port)},
 			Labels: map[string]string{
 				"instance": proxy.Name,
+				"server":   proxy.Server,
 				"group":    group,
 				"module":   "tcp_connect",
 			},
@@ -509,6 +510,7 @@ func convertDnsToJSON(domain string, ips []string, port int, group string) ([]by
 			Targets: []string{fmt.Sprintf("%s:%d", ip, port)},
 			Labels: map[string]string{
 				"instance": instance,
+				"domain":   domain,
 				"group":    group,
 				"module":   "tcp_connect",
 			},
