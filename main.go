@@ -71,10 +71,22 @@ func main() {
 }
 
 func dnsRequest(w http.ResponseWriter, r *http.Request) {
+
+	var domains []string
+	domainsParam := r.URL.Query().Get("domains")
+	if domainsParam != "" {
+		// 使用 "," 分割参数
+		domains = strings.Split(domainsParam, ",")
+	}
+
 	// Retrieve the domain  parameter from the query string
-	domain := r.URL.Query().Get("domain")
-	if domain == "" {
-		http.Error(w, "domain  parameter is required", http.StatusBadRequest)
+	domainParam := r.URL.Query().Get("domain")
+	if domainParam != "" {
+		domains = append(domains, domainParam)
+	}
+
+	if len(domains) == 0 {
+		http.Error(w, "domain or domains parameter is required", http.StatusBadRequest)
 		return
 	}
 	sport := r.URL.Query().Get("port")
@@ -103,12 +115,24 @@ func dnsRequest(w http.ResponseWriter, r *http.Request) {
 		// 使用 "," 分割参数
 		ecsIPs = strings.Split(ecsIPsParam, ",")
 	}
+	// ip去重
+	allIPMap := make(map[string]bool)
+	ipMaps := make(map[string][]string)
+	for _, domain := range domains {
+		var uniqueIPs []string
+		_, innerIps := queryAliDNS(domain, ecsIPs)
+		for _, ip := range innerIps {
+			if _, exists := allIPMap[ip]; !exists {
+				uniqueIPs = append(uniqueIPs, ip)
+				allIPMap[ip] = true
+			}
+		}
+		ipMaps[domain] = uniqueIPs
+	}
 
-	_, ips := queryAliDNS(domain, ecsIPs)
+	fmt.Printf("IP addresses for %s\n", ipMaps)
 
-	fmt.Printf("IP addresses for %s:%s\n", domain, ips)
-
-	proxiesJSON, err := convertDnsToJSON(domain, ips, port, subGroup, module)
+	proxiesJSON, err := convertDnsToJSON(ipMaps, port, subGroup, module)
 	if err != nil {
 		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
 		return
@@ -510,22 +534,23 @@ func convertProxiesToJSON(proxies []Proxy, group string, module string) ([]byte,
 	return json.MarshalIndent(proxiesJSON, "", "  ")
 }
 
-func convertDnsToJSON(domain string, ips []string, port int, group string, module string) ([]byte, error) {
-	proxiesJSON := make([]ProxyJSON, len(ips))
-
-	for i, ip := range ips {
-		instance := fmt.Sprintf("%s(%s):%d", domain, ip, port)
-		proxiesJSON[i] = ProxyJSON{
-			Targets: []string{fmt.Sprintf("%s:%d", ip, port)},
-			Labels: map[string]string{
-				"instance": instance,
-				"domain":   domain,
-				"group":    group,
-				"module":   module,
-			},
+func convertDnsToJSON(ipMaps map[string][]string, port int, group string, module string) ([]byte, error) {
+	var proxiesJSON []ProxyJSON
+	for domain, ips := range ipMaps {
+		for _, ip := range ips {
+			instance := fmt.Sprintf("%s(%s):%d", domain, ip, port)
+			proxiesJSON = append(proxiesJSON, ProxyJSON{
+				Targets: []string{fmt.Sprintf("%s:%d", ip, port)},
+				Labels: map[string]string{
+					"instance": instance,
+					"domain":   domain,
+					"group":    group,
+					"module":   module,
+					"ip":       ip,
+				},
+			})
 		}
 	}
-
 	return json.MarshalIndent(proxiesJSON, "", "  ")
 }
 
