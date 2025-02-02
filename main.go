@@ -92,6 +92,10 @@ func dnsRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "group parameter is required", http.StatusBadRequest)
 		return
 	}
+	module := r.URL.Query().Get("module")
+	if module == "" {
+		module = "tcp_connect"
+	}
 	var ecsIPs []string
 	// 获取参数 `ids`
 	ecsIPsParam := r.URL.Query().Get("ecsIPs") // 例如 "1,2,3"
@@ -104,7 +108,7 @@ func dnsRequest(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("IP addresses for %s:%s\n", domain, ips)
 
-	proxiesJSON, err := convertDnsToJSON(domain, ips, port, subGroup)
+	proxiesJSON, err := convertDnsToJSON(domain, ips, port, subGroup, module)
 	if err != nil {
 		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
 		return
@@ -327,6 +331,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		req.Header.Set("User-Agent", ua)
 	}
 
+	module := r.URL.Query().Get("module")
+	if module == "" {
+		module = "tcp_connect"
+	}
+
 	// Create an HTTP client and send the request
 	client := &http.Client{}
 	response, err := client.Do(req)
@@ -374,7 +383,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	} else {
 		proxies = removeDuplicateProxies(proxies)
 	}
-	proxiesJSON, err := convertProxiesToJSON(proxies, subGroup)
+	proxiesJSON, err := convertProxiesToJSON(proxies, subGroup, module)
 	if err != nil {
 		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
 		return
@@ -483,7 +492,7 @@ func removeDuplicateProxies(proxies []Proxy) []Proxy {
 	return uniqueProxies
 }
 
-func convertProxiesToJSON(proxies []Proxy, group string) ([]byte, error) {
+func convertProxiesToJSON(proxies []Proxy, group string, module string) ([]byte, error) {
 	proxiesJSON := make([]ProxyJSON, len(proxies))
 
 	for i, proxy := range proxies {
@@ -493,7 +502,7 @@ func convertProxiesToJSON(proxies []Proxy, group string) ([]byte, error) {
 				"instance": proxy.Name,
 				"server":   proxy.Server,
 				"group":    group,
-				"module":   "tcp_connect",
+				"module":   module,
 			},
 		}
 	}
@@ -501,7 +510,7 @@ func convertProxiesToJSON(proxies []Proxy, group string) ([]byte, error) {
 	return json.MarshalIndent(proxiesJSON, "", "  ")
 }
 
-func convertDnsToJSON(domain string, ips []string, port int, group string) ([]byte, error) {
+func convertDnsToJSON(domain string, ips []string, port int, group string, module string) ([]byte, error) {
 	proxiesJSON := make([]ProxyJSON, len(ips))
 
 	for i, ip := range ips {
@@ -512,7 +521,7 @@ func convertDnsToJSON(domain string, ips []string, port int, group string) ([]by
 				"instance": instance,
 				"domain":   domain,
 				"group":    group,
-				"module":   "tcp_connect",
+				"module":   module,
 			},
 		}
 	}
