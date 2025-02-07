@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/miekg/dns"
-	"golang.org/x/net/context"
 	"gopkg.in/yaml.v3"
 	"io"
 	"log"
@@ -66,14 +65,6 @@ type DoHResponse struct {
 }
 
 func main() {
-	// 设置全局 Resolver，指定 DNS 服务器
-	net.DefaultResolver = &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{}
-			return d.DialContext(ctx, "udp", aliUdpURL) // 使用 Google DNS
-		},
-	}
 	http.HandleFunc("/subscribe", handleRequest)
 	http.HandleFunc("/dns", dnsRequest)
 	fmt.Println("Server is listening on port 36639...")
