@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ProxyJSON defines the JSON structure as per the given format
@@ -301,7 +302,9 @@ func queryAliDNSWithEDNS(domain string, ecsIP string, useEDNS bool) ([]string, e
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
 
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send HTTP request: %v", err)
@@ -361,7 +364,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create an HTTP client and send the request
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
 	response, err := client.Do(req)
 	if err != nil {
 		http.Error(w, "Failed to fetch data", http.StatusInternalServerError)
@@ -383,7 +388,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Println("Parsed subscript Content:\n", string(body))
+	fmt.Printf("Parsed %s Content:\n%s\n", subGroup, string(body))
 
 	var rawYAML map[string]interface{}
 	if err := yaml.Unmarshal(body, &rawYAML); err != nil {
