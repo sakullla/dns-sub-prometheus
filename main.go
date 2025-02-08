@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
@@ -37,6 +38,9 @@ type ProxyJSON struct {
 
 const aliDoHURL = "https://dns.alidns.com/dns-query"
 const aliUdpURL = "223.5.5.5:53"
+const tencentURL = "119.29.29.29:53"
+
+var dnsServer string
 
 var ignoreKeyword = []string{"剩余流量", "下次重置", "套餐到期", "Traffic Reset", "Expire Date", "GB | "} // 定义字符串切片
 
@@ -64,7 +68,14 @@ type DoHResponse struct {
 	Answer   []DNSAnswer `json:"Answer"`
 }
 
+func init() {
+	// 绑定命令行参数到全局变量
+	flag.StringVar(&dnsServer, "dns", aliUdpURL, "custom dns server")
+}
+
 func main() {
+	// 解析命令行参数
+	flag.Parse()
 	http.HandleFunc("/subscribe", handleRequest)
 	http.HandleFunc("/dns", dnsRequest)
 	fmt.Println("Server is listening on port 36639...")
@@ -116,20 +127,37 @@ func dnsRequest(w http.ResponseWriter, r *http.Request) {
 		// 使用 "," 分割参数
 		ecsIPs = strings.Split(ecsIPsParam, ",")
 	}
-	// ip去重
-	allIPMap := make(map[string]bool)
-	ipMaps := make(map[string][]string)
+	var allIPMap = make(map[string]bool)   // 记录已解析的 IP，去重
+	var ipMaps = make(map[string][]string) // 存储每个域名的唯一 IP
+	var mutex sync.Mutex                   // 保护 allIPMap 共享资源
+	var wg sync.WaitGroup                  // 控制并发
 	for _, domain := range domains {
-		var uniqueIPs []string
-		_, innerIps := queryAliDNS(domain, ecsIPs)
-		for _, ip := range innerIps {
-			if _, exists := allIPMap[ip]; !exists {
-				uniqueIPs = append(uniqueIPs, ip)
-				allIPMap[ip] = true
+		wg.Add(1) // 增加等待的 goroutine 数量
+		go func(domain string) {
+			defer wg.Done() // 任务完成，减少计数
+
+			var uniqueIPs []string
+			_, innerIps := queryAliDNS(domain, ecsIPs)
+
+			// 处理去重
+			for _, ip := range innerIps {
+				mutex.Lock() // 加锁，保证 allIPMap 并发安全
+				if _, exists := allIPMap[ip]; !exists {
+					uniqueIPs = append(uniqueIPs, ip)
+					allIPMap[ip] = true
+				}
+				mutex.Unlock() // 解锁
 			}
-		}
-		ipMaps[domain] = uniqueIPs
+
+			// 保护 ipMaps 并发写入
+			mutex.Lock()
+			ipMaps[domain] = uniqueIPs
+			mutex.Unlock()
+
+		}(domain) // 传递参数，避免闭包问题
 	}
+
+	wg.Wait() // 等待所有 goroutine 完成
 
 	fmt.Printf("IP addresses for %s\n", ipMaps)
 
@@ -216,19 +244,19 @@ func getLocalDNSServer() string {
 	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
 	if err != nil {
 		fmt.Printf("无法读取本地 DNS 配置: %v", err)
-		return aliUdpURL
+		return dnsServer
 	}
 
 	if len(config.Servers) > 0 {
 		return config.Servers[0] + ":53" // 添加端口号
 	}
 
-	return aliUdpURL // 默认使用本地 DNS
+	return dnsServer // 默认使用本地 DNS
 }
 
 // dnsQuery 执行 DNS 查询
 func dnsQuery(domain string, qtype uint16, ecsIP string, useEDNS bool) ([]string, error) {
-	dnsServer := aliUdpURL
+	dnsServer := dnsServer
 	// 创建 DNS 消息
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(domain), qtype) // 设置查询问题
@@ -250,7 +278,9 @@ func dnsQuery(domain string, qtype uint16, ecsIP string, useEDNS bool) ([]string
 		m.Extra = append(m.Extra, edns)
 	}
 	// 创建 DNS 客户端
-	c := new(dns.Client)
+	c := &dns.Client{
+		Timeout: 10 * time.Second,
+	}
 	// 发送查询请求
 	r, _, err := c.Exchange(m, dnsServer)
 	if err != nil {
@@ -474,36 +504,46 @@ func isIPAddress(input string) bool {
 }
 
 func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
-	serverIndexMap := make(map[string]int)
-	var parseDnsProxies []Proxy
+	var serverIndexMap sync.Map // 并发安全的 map
+	var parseDnsProxies []Proxy // 结果存储
+	var mutex sync.Mutex        // 保护 parseDnsProxies
+	var wg sync.WaitGroup       // 并发控制
 	for i, proxy := range proxies {
 		if isIPAddress(proxy.Server) {
-			_, exists := serverIndexMap[proxy.Server]
-			if !exists {
-				serverIndexMap[proxy.Server] = i
+			if _, exists := serverIndexMap.Load(proxy.Server); !exists {
+				serverIndexMap.Store(proxy.Server, i)
+				mutex.Lock()
 				parseDnsProxies = append(parseDnsProxies, proxy) // Append proxy immediately when first encountered
+				mutex.Unlock()
 			}
 		} else {
-			if _, exists := serverIndexMap[proxy.Server]; !exists {
-				serverIndexMap[proxy.Server] = i
+			if _, exists := serverIndexMap.Load(proxy.Server); !exists {
+				serverIndexMap.Store(proxy.Server, i)
 				for _, ecsTag := range ecsIPMaps {
-					clientIp := ecsTag.Ip
-					clientName := ecsTag.Name
-					_, ips := queryAliDNS(proxy.Server, []string{clientIp})
-					// 复制结构体并修改 Server
-					for _, ip := range ips {
-						copyProxy := proxy
-						copyProxy.Name = fmt.Sprintf("%s(%s-%s)", proxy.Name, ip, clientName)
-						copyProxy.Server = ip
-						if _, subExists := serverIndexMap[copyProxy.Server]; !subExists {
-							serverIndexMap[copyProxy.Server] = i
-							parseDnsProxies = append(parseDnsProxies, copyProxy)
+					wg.Add(1) // 增加等待的 goroutine 数量
+					go func(ecsTag EcsTag) {
+						defer wg.Done()
+						clientIp := ecsTag.Ip
+						clientName := ecsTag.Name
+						_, ips := queryAliDNS(proxy.Server, []string{clientIp})
+						// 复制结构体并修改 Server
+						for _, ip := range ips {
+							copyProxy := proxy
+							copyProxy.Name = fmt.Sprintf("%s(%s-%s)", proxy.Name, ip, clientName)
+							copyProxy.Server = ip
+							if _, subExists := serverIndexMap.Load(copyProxy.Server); !subExists {
+								serverIndexMap.Store(copyProxy.Server, i)
+								mutex.Lock()
+								parseDnsProxies = append(parseDnsProxies, copyProxy)
+								mutex.Unlock()
+							}
 						}
-					}
+					}(ecsTag)
 				}
 			}
 		}
 	}
+	wg.Wait() // 等待所有 goroutine 完成
 	return parseDnsProxies
 }
 
