@@ -505,43 +505,52 @@ func isIPAddress(input string) bool {
 
 func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
 	var serverIndexMap sync.Map // 并发安全的 map
+	serverIndexPreMap := make(map[string]int)
+	serverServerMap := make(map[int]Proxy)
 	var parseDnsProxies []Proxy // 结果存储
 	var mutex sync.Mutex        // 保护 parseDnsProxies
 	var wg sync.WaitGroup       // 并发控制
 	for i, proxy := range proxies {
-		if isIPAddress(proxy.Server) {
-			if _, exists := serverIndexMap.Load(proxy.Server); !exists {
-				serverIndexMap.Store(proxy.Server, i)
-				mutex.Lock()
-				parseDnsProxies = append(parseDnsProxies, proxy) // Append proxy immediately when first encountered
-				mutex.Unlock()
-			}
-		} else {
-			if _, exists := serverIndexMap.Load(proxy.Server); !exists {
-				serverIndexMap.Store(proxy.Server, i)
-				for _, ecsTag := range ecsIPMaps {
-					wg.Add(1) // 增加等待的 goroutine 数量
-					go func(ecsTag EcsTag) {
-						defer wg.Done()
+		if _, exists := serverIndexPreMap[proxy.Server]; !exists {
+			serverIndexPreMap[proxy.Server] = i
+			serverServerMap[i] = proxy
+		}
+	}
+	for i, proxy := range serverServerMap {
+		wg.Add(1) // 增加等待的 goroutine 数量
+		go func(ii int, proxy2 Proxy) {
+			defer wg.Done()
+			if isIPAddress(proxy2.Server) {
+				if _, exists := serverIndexMap.Load(proxy2.Server); !exists {
+					serverIndexMap.Store(proxy2.Server, ii)
+					mutex.Lock()
+					parseDnsProxies = append(parseDnsProxies, proxy2) // Append proxy2 immediately when first encountered
+					mutex.Unlock()
+				}
+			} else {
+				if _, exists := serverIndexMap.Load(proxy2.Server); !exists {
+					serverIndexMap.Store(proxy2.Server, ii)
+					for _, ecsTag := range ecsIPMaps {
 						clientIp := ecsTag.Ip
 						clientName := ecsTag.Name
-						_, ips := queryAliDNS(proxy.Server, []string{clientIp})
+						_, ips := queryAliDNS(proxy2.Server, []string{clientIp})
 						// 复制结构体并修改 Server
 						for _, ip := range ips {
-							copyProxy := proxy
-							copyProxy.Name = fmt.Sprintf("%s(%s-%s)", proxy.Name, ip, clientName)
+							copyProxy := proxy2
+							copyProxy.Name = fmt.Sprintf("%s(%s-%s)", proxy2.Name, ip, clientName)
 							copyProxy.Server = ip
 							if _, subExists := serverIndexMap.Load(copyProxy.Server); !subExists {
-								serverIndexMap.Store(copyProxy.Server, i)
+								serverIndexMap.Store(copyProxy.Server, ii)
 								mutex.Lock()
 								parseDnsProxies = append(parseDnsProxies, copyProxy)
 								mutex.Unlock()
 							}
 						}
-					}(ecsTag)
+
+					}
 				}
 			}
-		}
+		}(i, proxy)
 	}
 	wg.Wait() // 等待所有 goroutine 完成
 	return parseDnsProxies
