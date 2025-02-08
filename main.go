@@ -284,7 +284,7 @@ func dnsQuery(domain string, qtype uint16, ecsIP string, useEDNS bool) ([]string
 	// 发送查询请求
 	r, _, err := c.Exchange(m, dnsServer)
 	if err != nil {
-		log.Fatalf("DNS 查询失败: %v", err)
+		log.Printf("DNS 查询失败: %v", err)
 	}
 
 	// 解析响应
