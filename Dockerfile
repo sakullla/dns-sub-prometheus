@@ -1,27 +1,35 @@
-# 使用官方 Go 作为构建阶段的基础镜像
-FROM golang:1.23 AS builder
+# 构建阶段
+FROM golang:1.23.4-alpine AS builder
 
 # 设置工作目录
 WORKDIR /app
 
-# 复制代码并编译
-COPY . .
-RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o dns-sub-prometheus
+# 安装基本的构建工具
+RUN apk add --no-cache git make
 
-# 运行容器的最终镜像
+# 复制 go.mod 和 go.sum 文件
+COPY go.mod go.sum ./
+
+# 下载依赖
+RUN go mod download
+
+# 复制源代码
+COPY . .
+
+# 构建应用
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o dns-sub-prometheus .
+
+# 运行阶段
 FROM alpine:latest
 
-# 安装 libc6-compat 以提供基本的 C 运行库支持（如果需要）
-RUN apk add --no-cache libc6-compat
+# 安装基本工具和CA证书
+RUN apk --no-cache add ca-certificates tzdata
 
-# 设置工作目录
-WORKDIR /root/
+# 创建运行目录
+RUN mkdir -p /bin
 
-# 复制编译好的二进制文件
-COPY --from=builder /app/dns-sub-prometheus /bin/dns-sub-prometheus
-
-# 确保二进制文件可执行
-RUN chmod +x /bin/dns-sub-prometheus
+# 从构建阶段复制编译好的二进制文件到 /bin
+COPY --from=builder /app/dns-sub-prometheus /bin/
 
 # 运行应用
 ENTRYPOINT ["/bin/dns-sub-prometheus"]
