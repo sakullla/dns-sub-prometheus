@@ -70,7 +70,7 @@ type DoHResponse struct {
 
 func init() {
 	// 绑定命令行参数到全局变量
-	flag.StringVar(&dnsServer, "dns", aliUdpURL, "custom dns server")
+	flag.StringVar(&dnsServer, "dns.server", aliUdpURL, "custom dns server")
 }
 
 func main() {
