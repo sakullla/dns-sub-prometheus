@@ -79,7 +79,7 @@ func main() {
 	http.HandleFunc("/subscribe", handleRequest)
 	http.HandleFunc("/dns", dnsRequest)
 	fmt.Println("Server is listening on port 36639...")
-	log.Fatal(http.ListenAndServe("127.0.0.1:36639", nil))
+	log.Fatal(http.ListenAndServe("0.0.0.0:36639", nil))
 }
 
 func dnsRequest(w http.ResponseWriter, r *http.Request) {
