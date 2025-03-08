@@ -14,4 +14,4 @@ WORKDIR /root/
 COPY --from=builder /app/dns-sub-prometheus .
 
 # 运行应用
-CMD ["./dns-sub-prometheus"]
+ENTRYPOINT ["./dns-sub-prometheus"]
