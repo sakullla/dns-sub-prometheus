@@ -11,7 +11,7 @@ RUN go mod tidy && go build -o dns-sub-prometheus
 # 运行容器的最终镜像
 FROM alpine:latest
 WORKDIR /root/
-COPY --from=builder /app/dns-sub-prometheus .
+COPY --from=builder /app/dns-sub-prometheus /bin/dns-sub-prometheus
 
 # 运行应用
-ENTRYPOINT ["./dns-sub-prometheus"]
+ENTRYPOINT ["/bin/dns-sub-prometheus"]
