@@ -2,15 +2,25 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/miekg/dns"
+	"github.com/sakullla/dns-sub-prometheus/share"
+	handlerService "github.com/xtls/xray-core/app/proxyman/command"
+	"github.com/xtls/xray-core/app/router"
+	routingService "github.com/xtls/xray-core/app/router/command"
+	cserial "github.com/xtls/xray-core/common/serial"
+	"github.com/xtls/xray-core/infra/conf"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"gopkg.in/yaml.v3"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,13 +31,6 @@ import (
 type EcsTag struct {
 	Name string `json:"name"`
 	Ip   string `json:"ip"`
-}
-
-// Proxy defines the Proxy struct for unmarshalling the relevant section of the YAML
-type Proxy struct {
-	Name   string `yaml:"name"`
-	Server string `yaml:"server"`
-	Port   int    `yaml:"port"`
 }
 
 // ProxyJSON defines the JSON structure as per the given format
@@ -41,6 +44,7 @@ const aliUdpURL = "223.5.5.5:53"
 const tencentURL = "119.29.29.29:53"
 
 var dnsServer string
+var configGrpc bool
 
 var ignoreKeyword = []string{"剩余流量", "下次重置", "套餐到期", "Traffic Reset", "Expire Date", "GB | "} // 定义字符串切片
 
@@ -71,6 +75,7 @@ type DoHResponse struct {
 func init() {
 	// 绑定命令行参数到全局变量
 	flag.StringVar(&dnsServer, "dns-server", aliUdpURL, "custom dns server")
+	flag.BoolVar(&configGrpc, "configGrpc", false, "custom dns server")
 }
 
 func main() {
@@ -78,8 +83,142 @@ func main() {
 	flag.Parse()
 	http.HandleFunc("/subscribe", handleRequest)
 	http.HandleFunc("/dns", dnsRequest)
+	http.HandleFunc("/monitor", monitorRequest)
 	fmt.Println("Server is listening on port 36639...")
 	log.Fatal(http.ListenAndServe("0.0.0.0:36639", nil))
+}
+
+func monitorRequest(w http.ResponseWriter, r *http.Request) {
+	// Retrieve the fetchSubscribe parameter from the query string
+	fetchSubscribe := r.URL.Query().Get("fetchSubscribe")
+	if fetchSubscribe == "" {
+		http.Error(w, "fetchSubscribe parameter is required", http.StatusBadRequest)
+		return
+	}
+	subGroup := r.URL.Query().Get("group")
+	if subGroup == "" {
+		http.Error(w, "group parameter is required", http.StatusBadRequest)
+		return
+	}
+	// Create a new HTTP request with the desired URL
+	req, err := http.NewRequest("GET", fetchSubscribe, nil)
+	if err != nil {
+		http.Error(w, "Failed to create HTTP request", http.StatusInternalServerError)
+		return
+	}
+	ua := r.URL.Query().Get("ua")
+	if ua != "" {
+		// Set the User-Agent header
+		req.Header.Set("User-Agent", ua)
+	}
+
+	module := r.URL.Query().Get("module")
+	if module == "" {
+		module = "tcp_connect"
+	}
+
+	// Create an HTTP client and send the request
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to fetch data", http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+		return
+	}
+
+	bodyStr := string(body)
+	fmt.Printf("Parsed %s Content:\n%s\n", subGroup, bodyStr)
+
+	clash, err := parseProxies(body)
+	if err != nil {
+		http.Error(w, "Error parsing proxies", http.StatusInternalServerError)
+		return
+	}
+	proxies := clash.Proxies
+	xrayConfig := clash.XrayConfig()
+	xrayProxies := xrayConfig.OutboundConfigs
+
+	filterNode := r.URL.Query().Get("filterNode") // 例如 "1,2,3"
+	if filterNode != "" {
+		proxies = filterProxies(proxies, filterNode)
+		xrayProxies = filterXrayProxies(xrayProxies, filterNode)
+	} else {
+		proxies = removeIgnoreProxies(proxies)
+		xrayProxies = removeIgnoreXrayProxies(xrayProxies)
+	}
+
+	proxiesJSON, err := convertProxiesToJSON(proxies, subGroup, module)
+	if err != nil {
+		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if _, err := w.Write(proxiesJSON); err != nil {
+		http.Error(w, "Error writing proxies to JSON", http.StatusInternalServerError)
+	}
+	callGrpc(xrayProxies)
+}
+
+func callGrpc(proxies []conf.OutboundDetourConfig) {
+	if !configGrpc || len(proxies) == 0 {
+		return
+	}
+	grpcClient, err := grpc.NewClient("xray:10812", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("failed to connect to Xray API: %v", err)
+	}
+	defer grpcClient.Close()
+	routeClient := routingService.NewRoutingServiceClient(grpcClient)
+	handleClient := handlerService.NewHandlerServiceClient(grpcClient)
+	ctx, c := dialAPIClient()
+	defer c()
+	var rules []*router.RoutingRule
+	for _, proxy := range proxies {
+		tag := proxy.Tag
+		rules = append(rules, &router.RoutingRule{
+			RuleTag:    tag,
+			Attributes: map[string]string{"proxy": tag},
+			TargetTag:  &router.RoutingRule_Tag{Tag: tag},
+		})
+		outbound, _ := proxy.Build()
+		adr := &handlerService.AddOutboundRequest{Outbound: outbound}
+		rsp, err := handleClient.AddOutbound(ctx, adr)
+		log.Printf("perform AddOutbound rsp: %s", rsp)
+		if err != nil {
+			log.Printf("failed to perform AddOutbound: %s", err)
+		}
+	}
+
+	routerConfig := &router.Config{
+		Rule: rules,
+	}
+
+	ra := &routingService.AddRuleRequest{
+		Config: cserial.ToTypedMessage(routerConfig),
+	}
+	rsp, err := routeClient.AddRule(ctx, ra)
+	log.Printf("perform AddRule rsp: %s", rsp)
+
+	if err != nil {
+		log.Printf("failed to perform AddRule: %s", err)
+
+	}
+}
+
+func dialAPIClient() (ctx context.Context, close func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(10)*time.Second)
+	close = func() {
+		cancel()
+	}
+	return ctx, close
 }
 
 func dnsRequest(w http.ResponseWriter, r *http.Request) {
@@ -420,17 +559,12 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Printf("Parsed %s Content:\n%s\n", subGroup, string(body))
 
-	var rawYAML map[string]interface{}
-	if err := yaml.Unmarshal(body, &rawYAML); err != nil {
-		http.Error(w, "Error unmarshalling YAML", http.StatusInternalServerError)
-		return
-	}
-
-	proxies, err := parseProxies(rawYAML)
+	clash, err := parseProxies(body)
 	if err != nil {
 		http.Error(w, "Error parsing proxies", http.StatusInternalServerError)
 		return
 	}
+	proxies := clash.Proxies
 	proxies = removeIgnoreProxies(proxies)
 
 	// 获取参数 `ids`
@@ -454,11 +588,44 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func removeIgnoreProxies(proxies []Proxy) []Proxy {
-	var uniqueProxies []Proxy
+func removeIgnoreProxies(proxies []share.ClashProxy) []share.ClashProxy {
+	var uniqueProxies []share.ClashProxy
 
 	for _, proxy := range proxies {
 		if !containsKeyword(proxy.Name, ignoreKeyword) {
+			uniqueProxies = append(uniqueProxies, proxy)
+		}
+	}
+	return uniqueProxies
+}
+
+func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig) []conf.OutboundDetourConfig {
+	var uniqueProxies []conf.OutboundDetourConfig
+
+	for _, proxy := range proxies {
+		if !containsKeyword(proxy.Tag, ignoreKeyword) {
+			uniqueProxies = append(uniqueProxies, proxy)
+		}
+	}
+	return uniqueProxies
+}
+
+func filterProxies(proxies []share.ClashProxy, node string) []share.ClashProxy {
+	var uniqueProxies []share.ClashProxy
+	regex := regexp.MustCompile(node)
+	for _, proxy := range proxies {
+		if regexpMatch(proxy.Name, regex) {
+			uniqueProxies = append(uniqueProxies, proxy)
+		}
+	}
+	return uniqueProxies
+}
+
+func filterXrayProxies(proxies []conf.OutboundDetourConfig, node string) []conf.OutboundDetourConfig {
+	var uniqueProxies []conf.OutboundDetourConfig
+	regex := regexp.MustCompile(node)
+	for _, proxy := range proxies {
+		if regexpMatch(proxy.Tag, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
 	}
@@ -484,18 +651,13 @@ func parseParamToEcsTag(rawValue string) []EcsTag {
 	return paramMap
 }
 
-func parseProxies(rawYAML map[string]interface{}) ([]Proxy, error) {
-	proxiesData, err := yaml.Marshal(rawYAML["proxies"])
+func parseProxies(body []byte) (share.ClashYaml, error) {
+	clash := share.ClashYaml{}
+	err := yaml.Unmarshal(body, &clash)
 	if err != nil {
-		return nil, fmt.Errorf("error extracting proxies section: %w", err)
+		return clash, fmt.Errorf("error extracting proxies section: %w", err)
 	}
-
-	var proxies []Proxy
-	if err := yaml.Unmarshal(proxiesData, &proxies); err != nil {
-		return nil, fmt.Errorf("error unmarshalling proxies: %w", err)
-	}
-
-	return proxies, nil
+	return clash, nil
 }
 
 // 判断输入是 IP 还是域名
@@ -503,13 +665,13 @@ func isIPAddress(input string) bool {
 	return net.ParseIP(input) != nil
 }
 
-func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
+func convert2DnsAndRemoveProxies(proxies []share.ClashProxy, ecsIPMaps []EcsTag) []share.ClashProxy {
 	var serverIndexMap sync.Map // 并发安全的 map
 	serverIndexPreMap := make(map[string]int)
-	serverServerMap := make(map[int]Proxy)
-	var parseDnsProxies []Proxy // 结果存储
-	var mutex sync.Mutex        // 保护 parseDnsProxies
-	var wg sync.WaitGroup       // 并发控制
+	serverServerMap := make(map[int]share.ClashProxy)
+	var parseDnsProxies []share.ClashProxy // 结果存储
+	var mutex sync.Mutex                   // 保护 parseDnsProxies
+	var wg sync.WaitGroup                  // 并发控制
 	for i, proxy := range proxies {
 		if _, exists := serverIndexPreMap[proxy.Server]; !exists {
 			serverIndexPreMap[proxy.Server] = i
@@ -518,7 +680,7 @@ func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
 	}
 	for i, proxy := range serverServerMap {
 		wg.Add(1) // 增加等待的 goroutine 数量
-		go func(ii int, proxy2 Proxy) {
+		go func(ii int, proxy2 share.ClashProxy) {
 			defer wg.Done()
 			if isIPAddress(proxy2.Server) {
 				if _, exists := serverIndexMap.Load(proxy2.Server); !exists {
@@ -556,9 +718,9 @@ func convert2DnsAndRemoveProxies(proxies []Proxy, ecsIPMaps []EcsTag) []Proxy {
 	return parseDnsProxies
 }
 
-func removeDuplicateProxies(proxies []Proxy) []Proxy {
+func removeDuplicateProxies(proxies []share.ClashProxy) []share.ClashProxy {
 	serverIndexMap := make(map[string]int)
-	var uniqueProxies []Proxy
+	var uniqueProxies []share.ClashProxy
 
 	for i, proxy := range proxies {
 		if _, exists := serverIndexMap[proxy.Server]; !exists {
@@ -570,17 +732,18 @@ func removeDuplicateProxies(proxies []Proxy) []Proxy {
 	return uniqueProxies
 }
 
-func convertProxiesToJSON(proxies []Proxy, group string, module string) ([]byte, error) {
+func convertProxiesToJSON(proxies []share.ClashProxy, group string, module string) ([]byte, error) {
 	proxiesJSON := make([]ProxyJSON, len(proxies))
-
 	for i, proxy := range proxies {
 		proxiesJSON[i] = ProxyJSON{
 			Targets: []string{fmt.Sprintf("%s:%d", proxy.Server, proxy.Port)},
 			Labels: map[string]string{
-				"instance": proxy.Name,
-				"server":   proxy.Server,
-				"group":    group,
-				"module":   module,
+				"instance":           proxy.Name,
+				"server":             proxy.Server,
+				"group":              group,
+				"module":             module,
+				"header_proxy_key":   "proxy",
+				"header_proxy_value": proxy.Name,
 			},
 		}
 	}
@@ -616,4 +779,9 @@ func containsKeyword(s string, keywords []string) bool {
 		}
 	}
 	return false
+}
+
+// containsKeyword 检查字符串是否包含关键字
+func regexpMatch(s string, regex *regexp.Regexp) bool {
+	return regex.MatchString(s)
 }
