@@ -154,7 +154,8 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 		proxies = removeIgnoreProxies(proxies)
 		xrayProxies = removeIgnoreXrayProxies(xrayProxies)
 	}
-
+	marshal, err := json.Marshal(xrayProxies)
+	fmt.Printf("Parsed xray Content:%s\n", marshal)
 	proxiesJSON, err := convertProxiesToJSON(proxies, subGroup, module)
 	if err != nil {
 		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
@@ -188,12 +189,18 @@ func callGrpc(proxies []conf.OutboundDetourConfig) {
 			Attributes: map[string]string{"proxy": tag},
 			TargetTag:  &router.RoutingRule_Tag{Tag: tag},
 		})
+		if proxy.StreamSetting == nil {
+			protocol := conf.TransportProtocol("raw")
+			proxy.StreamSetting = &conf.StreamConfig{
+				Network: &protocol,
+			}
+		}
 		outbound, _ := proxy.Build()
 		adr := &handlerService.AddOutboundRequest{Outbound: outbound}
-		rsp, err := handleClient.AddOutbound(ctx, adr)
-		log.Printf("perform AddOutbound rsp: %s", rsp)
+		fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
+		_, err = handleClient.AddOutbound(ctx, adr)
 		if err != nil {
-			log.Printf("failed to perform AddOutbound: %s", err)
+			log.Printf("failed to perform AddOutbound: %s\n", err)
 		}
 	}
 
@@ -204,11 +211,10 @@ func callGrpc(proxies []conf.OutboundDetourConfig) {
 	ra := &routingService.AddRuleRequest{
 		Config: cserial.ToTypedMessage(routerConfig),
 	}
-	rsp, err := routeClient.AddRule(ctx, ra)
-	log.Printf("perform AddRule rsp: %s", rsp)
+	_, err = routeClient.AddRule(ctx, ra)
 
 	if err != nil {
-		log.Printf("failed to perform AddRule: %s", err)
+		log.Printf("failed to perform AddRule: %s\n", err)
 
 	}
 }
