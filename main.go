@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/miekg/dns"
+	"github.com/patrickmn/go-cache"
 	"github.com/sakullla/dns-sub-prometheus/share"
 	handlerService "github.com/xtls/xray-core/app/proxyman/command"
 	"github.com/xtls/xray-core/app/router"
@@ -45,7 +46,7 @@ const tencentURL = "119.29.29.29:53"
 
 var dnsServer string
 var configGrpc bool
-
+var CACHE *cache.Cache
 var ignoreKeyword = []string{"剩余流量", "下次重置", "套餐到期", "Traffic Reset", "Expire Date", "GB | "} // 定义字符串切片
 
 type DNSQuery struct {
@@ -76,6 +77,8 @@ func init() {
 	// 绑定命令行参数到全局变量
 	flag.StringVar(&dnsServer, "dns-server", aliUdpURL, "custom dns server")
 	flag.BoolVar(&configGrpc, "configGrpc", false, "custom dns server")
+	CACHE = cache.New(5*time.Minute, 10*time.Minute)
+
 }
 
 func main() {
@@ -194,34 +197,34 @@ func callGrpc(proxies []conf.OutboundDetourConfig) {
 			Attributes: map[string]string{"proxy": tag},
 			TargetTag:  &router.RoutingRule_Tag{Tag: tag},
 		})
-		if proxy.StreamSetting == nil {
-			protocol := conf.TransportProtocol("raw")
-			proxy.StreamSetting = &conf.StreamConfig{
-				Network: &protocol,
-			}
-		}
 		outbound, _ := proxy.Build()
 		adr := &handlerService.AddOutboundRequest{Outbound: outbound}
 		fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
 		_, err = handleClient.AddOutbound(ctx, adr)
 		if err != nil {
 			log.Printf("failed to perform AddOutbound: %s\n", err)
+			d := &handlerService.RemoveOutboundRequest{Tag: tag}
+			_, err = handleClient.RemoveOutbound(ctx, d)
+			adr := &handlerService.AddOutboundRequest{Outbound: outbound}
+			fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
+			_, err = handleClient.AddOutbound(ctx, adr)
 		}
 	}
 
 	routerConfig := &router.Config{
 		Rule: rules,
 	}
-
+	_, shouldAppend := CACHE.Get("cache")
 	ra := &routingService.AddRuleRequest{
-		Config: cserial.ToTypedMessage(routerConfig),
+		Config:       cserial.ToTypedMessage(routerConfig),
+		ShouldAppend: shouldAppend,
 	}
 	_, err = routeClient.AddRule(ctx, ra)
 
 	if err != nil {
 		log.Printf("failed to perform AddRule: %s\n", err)
-
 	}
+	CACHE.SetDefault("cache", "cache")
 }
 
 func dialAPIClient() (ctx context.Context, close func()) {
@@ -603,6 +606,7 @@ func removeIgnoreProxies(proxies []share.ClashProxy) []share.ClashProxy {
 	var uniqueProxies []share.ClashProxy
 
 	for _, proxy := range proxies {
+		proxy.Name = strings.TrimSpace(proxy.Name)
 		if !containsKeyword(proxy.Name, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -614,6 +618,7 @@ func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig) []conf.Outboun
 	var uniqueProxies []conf.OutboundDetourConfig
 
 	for _, proxy := range proxies {
+		proxy.Tag = strings.TrimSpace(proxy.Tag)
 		if !containsKeyword(proxy.Tag, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -625,6 +630,7 @@ func filterProxies(proxies []share.ClashProxy, node string) []share.ClashProxy {
 	var uniqueProxies []share.ClashProxy
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
+		proxy.Name = strings.TrimSpace(proxy.Name)
 		if regexpMatch(proxy.Name, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -636,6 +642,7 @@ func filterXrayProxies(proxies []conf.OutboundDetourConfig, node string) []conf.
 	var uniqueProxies []conf.OutboundDetourConfig
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
+		proxy.Tag = strings.TrimSpace(proxy.Tag)
 		if regexpMatch(proxy.Tag, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
