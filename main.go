@@ -117,6 +117,11 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 		module = "tcp_connect"
 	}
 
+	remote := r.URL.Query().Get("remote")
+	if remote == "" {
+		remote = "http://www.google.com/generate_204"
+	}
+
 	// Create an HTTP client and send the request
 	client := &http.Client{
 		Timeout: 60 * time.Second,
@@ -156,7 +161,7 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	marshal, err := json.Marshal(xrayProxies)
 	fmt.Printf("Parsed xray Content:%s\n", marshal)
-	proxiesJSON, err := convertProxiesToJSON(proxies, subGroup, module)
+	proxiesJSON, err := convertProxiesToRemoteJSON(proxies, subGroup, module, remote)
 	if err != nil {
 		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
 		return
@@ -748,6 +753,26 @@ func convertProxiesToJSON(proxies []share.ClashProxy, group string, module strin
 				"server":             proxy.Server,
 				"group":              group,
 				"module":             module,
+				"header_proxy_key":   "proxy",
+				"header_proxy_value": proxy.Name,
+			},
+		}
+	}
+
+	return json.MarshalIndent(proxiesJSON, "", "  ")
+}
+
+func convertProxiesToRemoteJSON(proxies []share.ClashProxy, group string, module string, remote string) ([]byte, error) {
+	proxiesJSON := make([]ProxyJSON, len(proxies))
+	for i, proxy := range proxies {
+		proxiesJSON[i] = ProxyJSON{
+			Targets: []string{remote},
+			Labels: map[string]string{
+				"instance":           proxy.Name,
+				"server":             proxy.Server,
+				"group":              group,
+				"module":             module,
+				"remote":             remote,
 				"header_proxy_key":   "proxy",
 				"header_proxy_value": proxy.Name,
 			},
