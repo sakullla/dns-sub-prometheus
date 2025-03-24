@@ -602,7 +602,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func formatXrayName(proxy conf.OutboundDetourConfig, group string) {
+func formatXrayName(proxy *conf.OutboundDetourConfig, group string) {
 	tag := strings.TrimSpace(proxy.Tag)
 	if group != "" {
 		tag = strings.Join([]string{group, tag}, "-")
@@ -610,7 +610,7 @@ func formatXrayName(proxy conf.OutboundDetourConfig, group string) {
 	proxy.Tag = tag
 }
 
-func formatName(proxy share.ClashProxy, group string) {
+func formatName(proxy *share.ClashProxy, group string) {
 	name := strings.TrimSpace(proxy.Name)
 	if group != "" {
 		name = strings.Join([]string{group, name}, "-")
@@ -622,7 +622,7 @@ func removeIgnoreProxies(proxies []share.ClashProxy, group string) []share.Clash
 	var uniqueProxies []share.ClashProxy
 
 	for _, proxy := range proxies {
-		formatName(proxy, group)
+		formatName(&proxy, group)
 		if !containsKeyword(proxy.Name, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -634,7 +634,7 @@ func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig, group string) 
 	var uniqueProxies []conf.OutboundDetourConfig
 
 	for _, proxy := range proxies {
-		formatXrayName(proxy, group)
+		formatXrayName(&proxy, group)
 		if !containsKeyword(proxy.Tag, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -646,7 +646,7 @@ func filterProxies(proxies []share.ClashProxy, node string, group string) []shar
 	var uniqueProxies []share.ClashProxy
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
-		formatName(proxy, group)
+		formatName(&proxy, group)
 		if regexpMatch(proxy.Name, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -658,7 +658,7 @@ func filterXrayProxies(proxies []conf.OutboundDetourConfig, node string, group s
 	var uniqueProxies []conf.OutboundDetourConfig
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
-		formatXrayName(proxy, group)
+		formatXrayName(&proxy, group)
 		proxy.Tag = strings.TrimSpace(proxy.Tag)
 		if regexpMatch(proxy.Tag, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
