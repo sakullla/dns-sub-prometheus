@@ -156,11 +156,11 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 
 	filterNode := r.URL.Query().Get("filterNode") // 例如 "1,2,3"
 	if filterNode != "" {
-		proxies = filterProxies(proxies, filterNode)
-		xrayProxies = filterXrayProxies(xrayProxies, filterNode)
+		proxies = filterProxies(proxies, filterNode, subGroup)
+		xrayProxies = filterXrayProxies(xrayProxies, filterNode, subGroup)
 	} else {
-		proxies = removeIgnoreProxies(proxies)
-		xrayProxies = removeIgnoreXrayProxies(xrayProxies)
+		proxies = removeIgnoreProxies(proxies, subGroup)
+		xrayProxies = removeIgnoreXrayProxies(xrayProxies, subGroup)
 	}
 	marshal, err := json.Marshal(xrayProxies)
 	fmt.Printf("Parsed xray Content:%s\n", marshal)
@@ -579,7 +579,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxies := clash.Proxies
-	proxies = removeIgnoreProxies(proxies)
+	proxies = removeIgnoreProxies(proxies, "")
 
 	// 获取参数 `ids`
 	ecsIPsParam := r.URL.Query().Get("ecsIPMaps") // 例如 "1,2,3"
@@ -602,11 +602,27 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func removeIgnoreProxies(proxies []share.ClashProxy) []share.ClashProxy {
+func formatXrayName(proxy conf.OutboundDetourConfig, group string) {
+	tag := strings.TrimSpace(proxy.Tag)
+	if group != "" {
+		tag = strings.Join([]string{group, tag}, "-")
+	}
+	proxy.Tag = tag
+}
+
+func formatName(proxy share.ClashProxy, group string) {
+	name := strings.TrimSpace(proxy.Name)
+	if group != "" {
+		name = strings.Join([]string{group, name}, "-")
+	}
+	proxy.Name = name
+}
+
+func removeIgnoreProxies(proxies []share.ClashProxy, group string) []share.ClashProxy {
 	var uniqueProxies []share.ClashProxy
 
 	for _, proxy := range proxies {
-		proxy.Name = strings.TrimSpace(proxy.Name)
+		formatName(proxy, group)
 		if !containsKeyword(proxy.Name, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -614,11 +630,11 @@ func removeIgnoreProxies(proxies []share.ClashProxy) []share.ClashProxy {
 	return uniqueProxies
 }
 
-func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig) []conf.OutboundDetourConfig {
+func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig, group string) []conf.OutboundDetourConfig {
 	var uniqueProxies []conf.OutboundDetourConfig
 
 	for _, proxy := range proxies {
-		proxy.Tag = strings.TrimSpace(proxy.Tag)
+		formatXrayName(proxy, group)
 		if !containsKeyword(proxy.Tag, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -626,11 +642,11 @@ func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig) []conf.Outboun
 	return uniqueProxies
 }
 
-func filterProxies(proxies []share.ClashProxy, node string) []share.ClashProxy {
+func filterProxies(proxies []share.ClashProxy, node string, group string) []share.ClashProxy {
 	var uniqueProxies []share.ClashProxy
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
-		proxy.Name = strings.TrimSpace(proxy.Name)
+		formatName(proxy, group)
 		if regexpMatch(proxy.Name, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -638,10 +654,11 @@ func filterProxies(proxies []share.ClashProxy, node string) []share.ClashProxy {
 	return uniqueProxies
 }
 
-func filterXrayProxies(proxies []conf.OutboundDetourConfig, node string) []conf.OutboundDetourConfig {
+func filterXrayProxies(proxies []conf.OutboundDetourConfig, node string, group string) []conf.OutboundDetourConfig {
 	var uniqueProxies []conf.OutboundDetourConfig
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
+		formatXrayName(proxy, group)
 		proxy.Tag = strings.TrimSpace(proxy.Tag)
 		if regexpMatch(proxy.Tag, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
