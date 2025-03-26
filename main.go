@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -46,7 +48,9 @@ const tencentURL = "119.29.29.29:53"
 
 var dnsServer string
 var configGrpc bool
-var CACHE *cache.Cache
+var RuleCache *cache.Cache
+var outboundHashCache *cache.Cache
+var outboundNameCache *cache.Cache
 var ignoreKeyword = []string{"剩余流量", "下次重置", "套餐到期", "Traffic Reset", "Expire Date", "GB | "} // 定义字符串切片
 
 type DNSQuery struct {
@@ -77,8 +81,50 @@ func init() {
 	// 绑定命令行参数到全局变量
 	flag.StringVar(&dnsServer, "dns-server", aliUdpURL, "custom dns server")
 	flag.BoolVar(&configGrpc, "configGrpc", false, "custom dns server")
-	CACHE = cache.New(5*time.Minute, 10*time.Minute)
+	RuleCache = cache.New(24*time.Hour, 24*time.Hour)
+	outboundHashCache = cache.New(24*time.Hour, 12*time.Hour)
+	outboundNameCache = cache.New(24*time.Hour, 12*time.Hour)
+}
 
+// 最小前缀长度
+const minPrefixLen = 5
+
+// 获取唯一的最短前缀（不少于 minPrefixLen）
+func getUniquePrefix(hash string, history map[string]cache.Item) string {
+	for l := minPrefixLen; l <= len(hash); l++ {
+		prefix := hash[:l]
+		conflict := false
+		for _, hr := range history {
+			h := hr.Object.(string)
+			if len(h) >= l && h[:l] == prefix {
+				conflict = true
+				break
+			}
+		}
+		if !conflict {
+			return prefix
+		}
+	}
+	// 如果都冲突了，返回完整的 hash
+	return hash
+}
+
+// 获取结构体的 SHA256 哈希值
+func getStructHash[T any](data *T) (string, error) {
+	marshal, err := json.Marshal(data)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(marshal)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func formatName(proxy *share.ClashProxy, group *string) {
+	name := strings.TrimSpace(proxy.Name)
+	if *group != "" {
+		name = strings.Join([]string{*group, name}, "-")
+	}
+	proxy.Name = name
 }
 
 func main() {
@@ -150,8 +196,9 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error parsing proxies", http.StatusInternalServerError)
 		return
 	}
-	proxies := clash.Proxies
+	clash.Proxies = renameProxy(clash.Proxies, subGroup)
 	xrayConfig := clash.XrayConfig()
+	proxies := clash.Proxies
 	xrayProxies := xrayConfig.OutboundConfigs
 
 	filterNode := r.URL.Query().Get("filterNode") // 例如 "1,2,3"
@@ -164,7 +211,7 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	marshal, err := json.Marshal(xrayProxies)
 	fmt.Printf("Parsed xray Content:%s\n", marshal)
-	proxiesJSON, err := convertProxiesToRemoteJSON(proxies, subGroup, module, remote)
+	proxiesJSON, err := convertProxiesToRemoteJSON(proxies, subGroup, module, remote, outboundNameCache)
 	if err != nil {
 		http.Error(w, "Error converting proxies to JSON", http.StatusInternalServerError)
 		return
@@ -174,6 +221,21 @@ func monitorRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error writing proxies to JSON", http.StatusInternalServerError)
 	}
 	callGrpc(xrayProxies)
+}
+
+func renameProxy(proxies []share.ClashProxy, subGroup string) []share.ClashProxy {
+	var renameProxies []share.ClashProxy
+	for _, proxy := range proxies {
+		formatName(&proxy, &subGroup)
+		hash, err := getStructHash(&proxy)
+		if err == nil {
+			outboundNameCache.Delete(proxy.Name)
+			prefix := getUniquePrefix(hash, outboundNameCache.Items())
+			outboundNameCache.SetDefault(proxy.Name, prefix)
+		}
+		renameProxies = append(renameProxies, proxy)
+	}
+	return renameProxies
 }
 
 func callGrpc(proxies []conf.OutboundDetourConfig) {
@@ -189,42 +251,48 @@ func callGrpc(proxies []conf.OutboundDetourConfig) {
 	handleClient := handlerService.NewHandlerServiceClient(grpcClient)
 	ctx, c := dialAPIClient()
 	defer c()
-	var rules []*router.RoutingRule
 	for _, proxy := range proxies {
 		tag := proxy.Tag
-		rules = append(rules, &router.RoutingRule{
-			RuleTag:    tag,
-			Attributes: map[string]string{"proxy": tag},
-			TargetTag:  &router.RoutingRule_Tag{Tag: tag},
-		})
-		outbound, _ := proxy.Build()
-		adr := &handlerService.AddOutboundRequest{Outbound: outbound}
-		fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
-		_, err = handleClient.AddOutbound(ctx, adr)
-		if err != nil {
-			log.Printf("failed to perform AddOutbound: %s\n", err)
-			d := &handlerService.RemoveOutboundRequest{Tag: tag}
-			_, err = handleClient.RemoveOutbound(ctx, d)
+		headerProxyValue := getProxyValue(outboundNameCache, &tag)
+		if _, found := outboundHashCache.Get(*headerProxyValue); !found {
+			RuleCache.SetDefault(tag, &router.RoutingRule{
+				RuleTag:    tag,
+				Attributes: map[string]string{"proxy": *headerProxyValue},
+				TargetTag:  &router.RoutingRule_Tag{Tag: tag},
+			})
+			outbound, _ := proxy.Build()
 			adr := &handlerService.AddOutboundRequest{Outbound: outbound}
 			fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
 			_, err = handleClient.AddOutbound(ctx, adr)
+			if err != nil {
+				log.Printf("failed to perform AddOutbound: %s\n", err)
+				d := &handlerService.RemoveOutboundRequest{Tag: tag}
+				_, err = handleClient.RemoveOutbound(ctx, d)
+				adr := &handlerService.AddOutboundRequest{Outbound: outbound}
+				fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
+				_, err = handleClient.AddOutbound(ctx, adr)
+			}
+			outboundHashCache.SetDefault(*headerProxyValue, true)
 		}
 	}
 
-	routerConfig := &router.Config{
-		Rule: rules,
+	if RuleCache.ItemCount() > 0 {
+		var rules []*router.RoutingRule
+		for _, v := range RuleCache.Items() {
+			rules = append(rules, v.Object.(*router.RoutingRule))
+		}
+		routerConfig := &router.Config{
+			Rule: rules,
+		}
+		ra := &routingService.AddRuleRequest{
+			Config:       cserial.ToTypedMessage(routerConfig),
+			ShouldAppend: false,
+		}
+		_, err = routeClient.AddRule(ctx, ra)
+		if err != nil {
+			log.Printf("failed to perform AddRule: %s\n", err)
+		}
 	}
-	_, shouldAppend := CACHE.Get("cache")
-	ra := &routingService.AddRuleRequest{
-		Config:       cserial.ToTypedMessage(routerConfig),
-		ShouldAppend: shouldAppend,
-	}
-	_, err = routeClient.AddRule(ctx, ra)
-
-	if err != nil {
-		log.Printf("failed to perform AddRule: %s\n", err)
-	}
-	CACHE.SetDefault("cache", "cache")
 }
 
 func dialAPIClient() (ctx context.Context, close func()) {
@@ -602,27 +670,10 @@ func handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func formatXrayName(proxy *conf.OutboundDetourConfig, group string) {
-	tag := strings.TrimSpace(proxy.Tag)
-	if group != "" {
-		tag = strings.Join([]string{group, tag}, "-")
-	}
-	proxy.Tag = tag
-}
-
-func formatName(proxy *share.ClashProxy, group string) {
-	name := strings.TrimSpace(proxy.Name)
-	if group != "" {
-		name = strings.Join([]string{group, name}, "-")
-	}
-	proxy.Name = name
-}
-
 func removeIgnoreProxies(proxies []share.ClashProxy, group string) []share.ClashProxy {
 	var uniqueProxies []share.ClashProxy
 
 	for _, proxy := range proxies {
-		formatName(&proxy, group)
 		if !containsKeyword(proxy.Name, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -634,7 +685,6 @@ func removeIgnoreXrayProxies(proxies []conf.OutboundDetourConfig, group string) 
 	var uniqueProxies []conf.OutboundDetourConfig
 
 	for _, proxy := range proxies {
-		formatXrayName(&proxy, group)
 		if !containsKeyword(proxy.Tag, ignoreKeyword) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -646,7 +696,6 @@ func filterProxies(proxies []share.ClashProxy, node string, group string) []shar
 	var uniqueProxies []share.ClashProxy
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
-		formatName(&proxy, group)
 		if regexpMatch(proxy.Name, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
 		}
@@ -658,7 +707,6 @@ func filterXrayProxies(proxies []conf.OutboundDetourConfig, node string, group s
 	var uniqueProxies []conf.OutboundDetourConfig
 	regex := regexp.MustCompile(node)
 	for _, proxy := range proxies {
-		formatXrayName(&proxy, group)
 		proxy.Tag = strings.TrimSpace(proxy.Tag)
 		if regexpMatch(proxy.Tag, regex) {
 			uniqueProxies = append(uniqueProxies, proxy)
@@ -786,9 +834,10 @@ func convertProxiesToJSON(proxies []share.ClashProxy, group string, module strin
 	return json.MarshalIndent(proxiesJSON, "", "  ")
 }
 
-func convertProxiesToRemoteJSON(proxies []share.ClashProxy, group string, module string, remote string) ([]byte, error) {
+func convertProxiesToRemoteJSON(proxies []share.ClashProxy, group string, module string, remote string, nameCache *cache.Cache) ([]byte, error) {
 	proxiesJSON := make([]ProxyJSON, len(proxies))
 	for i, proxy := range proxies {
+		headerProxyValue := getProxyValue(nameCache, &proxy.Name)
 		proxiesJSON[i] = ProxyJSON{
 			Targets: []string{remote},
 			Labels: map[string]string{
@@ -798,12 +847,25 @@ func convertProxiesToRemoteJSON(proxies []share.ClashProxy, group string, module
 				"module":             module,
 				"remote":             remote,
 				"header_proxy_key":   "proxy",
-				"header_proxy_value": proxy.Name,
+				"header_proxy_value": *headerProxyValue,
 			},
 		}
 	}
-
 	return json.MarshalIndent(proxiesJSON, "", "  ")
+}
+
+func getProxyValue(nameCache *cache.Cache, name *string) *string {
+	var headerProxyValue *string
+	if x, found := nameCache.Get(*name); found {
+		if u, ok := x.(string); ok {
+			headerProxyValue = &u
+		} else {
+			headerProxyValue = name
+		}
+	} else {
+		headerProxyValue = name
+	}
+	return headerProxyValue
 }
 
 func convertDnsToJSON(ipMaps map[string][]string, port int, group string, module string) ([]byte, error) {
