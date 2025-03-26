@@ -81,7 +81,7 @@ func init() {
 	// 绑定命令行参数到全局变量
 	flag.StringVar(&dnsServer, "dns-server", aliUdpURL, "custom dns server")
 	flag.BoolVar(&configGrpc, "configGrpc", false, "custom dns server")
-	RuleCache = cache.New(24*time.Hour, 24*time.Hour)
+	RuleCache = cache.New(10*time.Minute, 10*time.Minute)
 	outboundHashCache = cache.New(24*time.Hour, 12*time.Hour)
 	outboundNameCache = cache.New(24*time.Hour, 12*time.Hour)
 }
