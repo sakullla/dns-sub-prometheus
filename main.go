@@ -81,7 +81,7 @@ func init() {
 	// 绑定命令行参数到全局变量
 	flag.StringVar(&dnsServer, "dns-server", aliUdpURL, "custom dns server")
 	flag.BoolVar(&configGrpc, "configGrpc", false, "custom dns server")
-	RuleCache = cache.New(10*time.Minute, 10*time.Minute)
+	RuleCache = cache.New(48*time.Hour, 48*time.Hour)
 	outboundHashCache = cache.New(24*time.Hour, 12*time.Hour)
 	outboundNameCache = cache.New(24*time.Hour, 12*time.Hour)
 }
@@ -254,12 +254,12 @@ func callGrpc(proxies []conf.OutboundDetourConfig) {
 	for _, proxy := range proxies {
 		tag := proxy.Tag
 		headerProxyValue := getProxyValue(outboundNameCache, &tag)
+		RuleCache.SetDefault(tag, &router.RoutingRule{
+			RuleTag:    tag,
+			Attributes: map[string]string{"proxy": *headerProxyValue},
+			TargetTag:  &router.RoutingRule_Tag{Tag: tag},
+		})
 		if _, found := outboundHashCache.Get(*headerProxyValue); !found {
-			RuleCache.SetDefault(tag, &router.RoutingRule{
-				RuleTag:    tag,
-				Attributes: map[string]string{"proxy": *headerProxyValue},
-				TargetTag:  &router.RoutingRule_Tag{Tag: tag},
-			})
 			outbound, _ := proxy.Build()
 			adr := &handlerService.AddOutboundRequest{Outbound: outbound}
 			fmt.Printf("Parsed AddOutboundRequest Content: %s\n", adr.String())
